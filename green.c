@@ -1,11 +1,16 @@
 #include "green.h"
 
 #include <assert.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <ucontext.h>
 
+#include <sys/time.h>
+
 #define FALSE		0
 #define TRUE		1
+
+#define PERIOD		100
 
 #define STACK_SIZE	4096
 
@@ -16,6 +21,8 @@
 
 static ucontext_t	main_context = {0};
 static green_t		main_green = {&main_context, NULL, NULL, NULL, NULL, FALSE};
+
+static sigset_t		block;
 
 static green_t		*running = &main_green;
 
@@ -57,12 +64,40 @@ static inline void push_waiting(green_t *waited, green_t *waiter) {
 	waited->join = waiter;
 }
 
+void timer_handler(int);
+
 static void init()	__attribute__((constructor));	// why hate on C, only any library you add can have an invisible initialize function
 
 void init() {
 	getcontext(&main_context);
 	
 	ready_queue.front = ready_queue.back = NULL;
+	
+	// Initialize scheduler timer
+	sigemptyset(&block);
+	sigaddset(&block, SIGVTALRM);
+	
+	struct sigaction action = {0};
+	struct timeval interval;
+	struct itimerval period;
+	
+	action.sa_handler = timer_handler;
+	int result = sigaction(
+		SIGVTALRM,	// the signal for which to set the action
+		&action,	// the action to call for the signal
+		NULL);		// the out pointer to store old action
+		
+	assert(result == 0);
+	
+	interval.tv_sec = 0;
+	interval.tv_usec = PERIOD;
+	
+	period.it_interval = interval;
+	period.it_value = interval;
+	setitimer(
+		ITIMER_VIRTUAL,	// use user-time
+		&period,		// the new itimerval to set to
+		NULL);			// the out pointer for old itimerval
 }
 
 void green_thread() {
@@ -70,9 +105,12 @@ void green_thread() {
 	
 	(*this->func)(this->arg);	// execute user function
 	
+	// We are in key area, so make sure not to corrupt any queues
 	// Place waiting thread to the ready queue
 	if (this->join) {
+		sigprocmask(SIG_BLOCK, &block, NULL);
 		push_ready_queue(this->join);
+		sigprocmask(SIG_UNBLOCK, &block, NULL);
 	}
 	
 	// Free allocated memory
@@ -82,8 +120,10 @@ void green_thread() {
 	// this thread is now a zombie
 	this->zombie = TRUE;
 	
+	sigprocmask(SIG_BLOCK, &block, NULL);
 	running = pop_ready_queue();
 	setcontext(running->context);
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
 }
 
 int green_create(green_t *new, void *(*func)(void *), void *arg) {
@@ -115,12 +155,14 @@ int green_create(green_t *new, void *(*func)(void *), void *arg) {
 }
 
 int green_yield() {
+	sigprocmask(SIG_BLOCK, &block, NULL);
 	green_t *suspended = running;
 	
 	push_ready_queue(suspended);
 	
 	running = pop_ready_queue();
 	swapcontext(suspended->context, running->context);
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
 	return 0;
 }
@@ -128,12 +170,14 @@ int green_yield() {
 int green_join(green_t *thread) {
 	if (thread->zombie) return 0;
 	
+	sigprocmask(SIG_BLOCK, &block, NULL);
 	green_t *suspended = running;
 	
 	push_waiting(thread, suspended);
 	
 	running = pop_ready_queue();
 	swapcontext(suspended->context, running->context);
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
 	return 0;
 }
@@ -167,11 +211,13 @@ void green_cond_init(green_cond_t *condition) {
 }
 
 void green_cond_wait(green_cond_t *condition) {
+	sigprocmask(SIG_BLOCK, &block, NULL);
 	green_t *suspended = running;
 	push_cond(condition, suspended);
 	
 	running = pop_ready_queue();
 	swapcontext(suspended->context, running->context);
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
 }
 
 void green_cond_signal(green_cond_t *condition) {
@@ -179,5 +225,16 @@ void green_cond_signal(green_cond_t *condition) {
 
 	// Fairly straight forward
 	// Although user might signal a condition that no thread is waiting on...
+	sigprocmask(SIG_BLOCK, &block, NULL);
 	push_ready_queue(pop_cond(condition));
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+}
+
+void timer_handler(int sig) {
+	green_t *suspended = running;
+	
+	push_ready_queue(suspended);
+	
+	running = pop_ready_queue();
+	swapcontext(suspended->context, running->context);
 }
