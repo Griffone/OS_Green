@@ -26,6 +26,15 @@ typedef struct green_cond_t {
 	struct green_t *front, *back;
 } green_cond_t;
 
+/// Mutex structure
+///
+/// Allows safe concurrent access to common data structures
+/// Avoid modifying it outside of the library
+typedef struct green_mutex_t {
+	volatile int	taken;
+	struct green_t	*suspended;
+} green_mutex_t;
+
 /// Create and start execution of a new thread
 ///
 /// Attempts to mirror pthread_create() functionality
@@ -47,3 +56,14 @@ void green_cond_wait(green_cond_t *);
 ///
 /// Similar to pthread_cond_signal has no effect if no thread is currently waiting on condition
 void green_cond_signal(green_cond_t *);
+
+/// Initialize provided mutex
+void green_mutex_init(green_mutex_t *);
+
+/// Aquire a lock for given mutex mutex
+///
+/// Trying to lock a locked mutex will suspend thread until it is unlocked
+int green_mutex_lock(green_mutex_t *);
+
+/// Release the lock for a given mutex
+int green_mutex_unlock(green_mutex_t *);

@@ -14,38 +14,54 @@ void *test(void *arg);
 
 void *hugger(void *arg);
 
-static struct {
-	int counter[COUNTER_SIZE];	// large structure to increase chances of increment conflict
-} common;
+static struct counter {
+	int parts[COUNTER_SIZE];	// large structure to increase chances of increment conflict
+} safe_counter, unsafe_counter;
 
-void increment_counter() {
+green_mutex_t mutex;
+
+static inline void increment_counter(struct counter *counter) {
 	for (int i = 0; i < COUNTER_SIZE; ++i) {
-		common.counter[i]++;
+		counter->parts[i]++;
 	}
 }
 
-void validate_counter() {
-	int c = common.counter[0];
+// Make sure the counter is not corrupted (all parts align)
+//
+// Returns 0 if counter is valid
+// Returns an integer position of corrupted otherwise
+int is_corrupted(struct counter *counter) {
+	int c = counter->parts[0];
 	int corrupted = 0;
 	
 	for (int i = 1; i < COUNTER_SIZE; ++i) {
-		if (corrupted == 0 && common.counter[i] != c) {
+		if (corrupted == 0 && counter->parts[i] != c) {
 			corrupted = i;
 		}
-		common.counter[i] = c;
+		counter->parts[i] = c;
 	}
 	
-	if (corrupted) {
-		printf("Counter was corrupted at %d\n", corrupted);
-	}
+	return corrupted;
+}
+
+static inline void do_counters() {
+	increment_counter(&unsafe_counter);
+	if (is_corrupted(&unsafe_counter))
+		printf("Unsafe counter got corrupted!\n");
+	green_mutex_lock(&mutex);
+	increment_counter(&safe_counter);
+	if (is_corrupted(&safe_counter))
+		printf("Safe counter gor corrupted!\n");
+	green_mutex_unlock(&mutex);
 }
 
 int main() {
 	green_t g0, g1, g2;
 	green_cond_init(&cond);
+	green_mutex_init(&mutex);
 	
 	for (int i = 0; i < COUNTER_SIZE; ++i) {
-		common.counter[i] = 0;
+		safe_counter.parts[i] = unsafe_counter.parts[i] = 0;
 	}
 	
 	int a0 = 0;
@@ -68,8 +84,7 @@ void *test(void *arg) {
 	while (loop > 0) {
 		if (flag == id) {
 			printf("thread %d: %d\n", id, loop);
-			increment_counter();
-			validate_counter();
+			do_counters();
 			loop--;
 			flag = (id + 1) % 2;
 			//green_yield();
@@ -91,8 +106,7 @@ void *hugger(void *arg) {
 #if VERBOSE_HUGGER
 			printf("Hugger at %i cycles, still no yield!\n", i);
 #endif // VERBOSE_HUGGER
-			increment_counter();
-			validate_counter();
+			do_counters();
 		}
 	}
 }

@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <ucontext.h>
 
@@ -237,4 +238,51 @@ void timer_handler(int sig) {
 	
 	running = pop_ready_queue();
 	swapcontext(suspended->context, running->context);
+}
+
+void green_mutex_init(green_mutex_t *mutex) {
+	mutex->taken = FALSE;
+	mutex->suspended = NULL;
+}
+
+int green_mutex_lock(green_mutex_t *mutex) {
+	sigprocmask(SIG_BLOCK, &block, NULL);
+	
+	green_t *suspended = running;
+	while (mutex->taken) {
+		if (mutex->suspended != NULL) {
+			// find end of queue
+			green_t *last = mutex->suspended;
+			while (last->next != NULL) last = last->next;
+			
+			last->next = suspended;
+		} else {
+			// Get first in queue
+			mutex->suspended = suspended;
+		}
+		suspended->next = NULL;
+		
+		running = pop_ready_queue();
+		swapcontext(suspended->context, running->context);
+	}
+	
+	mutex->taken = TRUE;
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	
+	return 0;
+}
+
+int green_mutex_unlock(green_mutex_t *mutex) {
+	sigprocmask(SIG_BLOCK, &block, NULL);
+	
+	// Move only one thread, as the only way its one of the suspended onces is it's trying to lock mutex
+	if (mutex->suspended != NULL) {
+		push_ready_queue(mutex->suspended);
+		mutex->suspended = mutex->suspended->next;
+	}
+	
+	mutex->taken = FALSE;
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	
+	return 0;
 }
