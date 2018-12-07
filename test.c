@@ -2,9 +2,10 @@
 
 #include <stdio.h>
 
-#define LOOP_COUNT		5
+#define LOOP_COUNT		10
 #define VERBOSE_HUGGER	0
 #define SKIP_HUGGER		0
+#define COUNTER_SIZE	1000000
 
 int flag = 0;
 green_cond_t cond;
@@ -13,9 +14,39 @@ void *test(void *arg);
 
 void *hugger(void *arg);
 
+static struct {
+	int counter[COUNTER_SIZE];	// large structure to increase chances of increment conflict
+} common;
+
+void increment_counter() {
+	for (int i = 0; i < COUNTER_SIZE; ++i) {
+		common.counter[i]++;
+	}
+}
+
+void validate_counter() {
+	int c = common.counter[0];
+	int corrupted = 0;
+	
+	for (int i = 1; i < COUNTER_SIZE; ++i) {
+		if (corrupted == 0 && common.counter[i] != c) {
+			corrupted = i;
+		}
+		common.counter[i] = c;
+	}
+	
+	if (corrupted) {
+		printf("Counter was corrupted at %d\n", corrupted);
+	}
+}
+
 int main() {
 	green_t g0, g1, g2;
 	green_cond_init(&cond);
+	
+	for (int i = 0; i < COUNTER_SIZE; ++i) {
+		common.counter[i] = 0;
+	}
 	
 	int a0 = 0;
 	int a1 = 1;
@@ -37,6 +68,8 @@ void *test(void *arg) {
 	while (loop > 0) {
 		if (flag == id) {
 			printf("thread %d: %d\n", id, loop);
+			increment_counter();
+			validate_counter();
 			loop--;
 			flag = (id + 1) % 2;
 			//green_yield();
@@ -58,6 +91,8 @@ void *hugger(void *arg) {
 #if VERBOSE_HUGGER
 			printf("Hugger at %i cycles, still no yield!\n", i);
 #endif // VERBOSE_HUGGER
+			increment_counter();
+			validate_counter();
 		}
 	}
 }
