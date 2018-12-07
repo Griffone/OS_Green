@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-#define LOOP_COUNT		10
+#define LOOP_COUNT		11
 #define VERBOSE_HUGGER	0
 #define SKIP_HUGGER		0
 #define COUNTER_SIZE	1000000
@@ -51,7 +51,7 @@ static inline void do_counters() {
 	green_mutex_lock(&mutex);
 	increment_counter(&safe_counter);
 	if (is_corrupted(&safe_counter))
-		printf("Safe counter gor corrupted!\n");
+		printf("Safe counter got corrupted!\n");
 	green_mutex_unlock(&mutex);
 }
 
@@ -83,9 +83,9 @@ void *test(void *arg) {
 	int loop = LOOP_COUNT;
 	while (loop > 0) {
 		if (flag == id) {
-			printf("thread %d: %d\n", id, loop);
+			printf("thread %d: %d\n", id, --loop);
+			//loop--;
 			do_counters();
-			loop--;
 			flag = (id + 1) % 2;
 			//green_yield();
 			green_cond_signal(&cond);

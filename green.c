@@ -56,15 +56,6 @@ static inline green_t *pop_ready_queue() {
 	return thread;
 }
 
-static inline void push_waiting(green_t *waited, green_t *waiter) {
-	// Make sure the wait-sequence makes sense
-	while (waited->join) {
-		waited = waited->join;
-	}
-	
-	waited->join = waiter;
-}
-
 void timer_handler(int);
 
 static void init()	__attribute__((constructor));	// why hate on C, only any library you add can have an invisible initialize function
@@ -108,11 +99,12 @@ void green_thread() {
 	
 	// We are in key area, so make sure not to corrupt any queues
 	// Place waiting thread to the ready queue
-	if (this->join) {
-		sigprocmask(SIG_BLOCK, &block, NULL);
+	sigprocmask(SIG_BLOCK, &block, NULL);
+	while (this->join != NULL) {
 		push_ready_queue(this->join);
-		sigprocmask(SIG_UNBLOCK, &block, NULL);
+		this->join = this->join->next;
 	}
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
 	// Free allocated memory
 	free(this->context->uc_stack.ss_sp);
@@ -150,7 +142,9 @@ int green_create(green_t *new, void *(*func)(void *), void *arg) {
 	new->join = NULL;
 	new->zombie = FALSE;
 	
+	sigprocmask(SIG_BLOCK, &block, NULL);
 	push_ready_queue(new);
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
 	return 0;
 }
@@ -174,7 +168,11 @@ int green_join(green_t *thread) {
 	sigprocmask(SIG_BLOCK, &block, NULL);
 	green_t *suspended = running;
 	
-	push_waiting(thread, suspended);
+	// This is smart
+	// Make next null if we're the only ones waiting
+	// Make next something if someone is already waiting
+	suspended->next = thread->join;
+	thread->join = suspended;
 	
 	running = pop_ready_queue();
 	swapcontext(suspended->context, running->context);
