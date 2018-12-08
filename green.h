@@ -17,13 +17,19 @@ typedef struct green_t {
 	int zombie;
 } green_t;
 
+/// Basic queue header for this library
+typedef struct green_queue_t {
+	int count;
+	struct green_t *front, *back;
+} green_queue_t;
+
 /// Conditional variable structure
 ///
 /// Contains all necessary info for a given conditional variable
 /// Avoid modifying it outside of the library
 /// Use provided functions to work with the variable
 typedef struct green_cond_t {
-	struct green_t *front, *back;
+	struct green_queue_t queue;
 } green_cond_t;
 
 /// Mutex structure
@@ -31,8 +37,8 @@ typedef struct green_cond_t {
 /// Allows safe concurrent access to common data structures
 /// Avoid modifying it outside of the library
 typedef struct green_mutex_t {
-	volatile int	taken;
-	struct green_t	*suspended;
+	volatile int			taken;
+	struct green_queue_t	queue;
 } green_mutex_t;
 
 /// Create and start execution of a new thread
@@ -50,7 +56,10 @@ int green_join(green_t *);
 void green_cond_init(green_cond_t *);
 
 /// Suspend the current thread on the condition
-void green_cond_wait(green_cond_t *);
+///
+/// Atomically releases the mutex lock
+/// This is necessary to avoid missing a cond_signal
+int green_cond_wait(green_cond_t *condition, green_mutex_t *mutex);
 
 /// Signal a thread on condition
 ///

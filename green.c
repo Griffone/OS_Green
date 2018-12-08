@@ -17,43 +17,46 @@
 
 // These are safety marks, disabling this saves 1 cycle per function each
 // (assert might be more), but enabling this makes debugging easier
+//
+// NO PROMISES ON CORRECT FUNCTIONALITY IF SET TO 0!
+// That said, since assert would panic the program on triggering if your tests run fine, you can disable it
 #define CLEAN_NEXT			1	// Make sure the green_t.next is NULL on a freshly popped thread
 #define NON_EMPTY_ASSERT	1	// Check queue emptiness on popping
 
-static ucontext_t	main_context = {0};
-static green_t		main_green = {&main_context, NULL, NULL, NULL, NULL, FALSE};
+static ucontext_t		main_context = {0};
+static green_t			main_green = {&main_context, NULL, NULL, NULL, NULL, FALSE};
 
-static sigset_t		block;
+static sigset_t			block;
 
-static green_t		*running = &main_green;
+static green_t			*running = &main_green;
 
-static struct {
-	struct green_t *front, *back;
-} ready_queue;
+static green_queue_t	ready_queue;
 
-static inline void push_ready_queue(green_t *thread) {
-	if (ready_queue.back != NULL) {
-		ready_queue.back->next = thread;
-		ready_queue.back = thread;
-	} else {
-		ready_queue.back = ready_queue.front = thread;
-	}
+static inline void push_queue(green_queue_t *queue, green_t *thread) {
+	queue->back = (queue->back) ? (queue->back->next = thread) : (queue->front = thread);
 }
 
-static inline green_t *pop_ready_queue() {
+static inline green_t *pop_queue(green_queue_t *queue) {
+	queue->count--;
 #if NON_EMPTY_ASSERT
-	assert(ready_queue.front != NULL);
+	if (queue->front == NULL) printf("%p - PANIC! (%i)\n", queue, queue->count);
+	assert(queue->front != NULL);
 #endif // NON_EMPTY_ASSERT
-	green_t *thread = ready_queue.front;
-	ready_queue.front = thread->next;
+	green_t *thread = queue->front;
+	queue->front = thread->next;
 	
-	if (thread->next == NULL) ready_queue.back = NULL;
-	
+	if (thread->next == NULL) queue->back = NULL;
+
 #if CLEAN_NEXT
 	thread->next = NULL;
 #endif // CLEAN_NEXT
-	
+
 	return thread;
+}
+
+static inline void init_queue(green_queue_t *queue) {
+	queue->front = queue->back = NULL;
+	queue->count = 0;
 }
 
 void timer_handler(int);
@@ -63,7 +66,7 @@ static void init()	__attribute__((constructor));	// why hate on C, only any libr
 void init() {
 	getcontext(&main_context);
 	
-	ready_queue.front = ready_queue.back = NULL;
+	init_queue(&ready_queue);
 	
 	// Initialize scheduler timer
 	sigemptyset(&block);
@@ -101,7 +104,7 @@ void green_thread() {
 	// Place waiting thread to the ready queue
 	sigprocmask(SIG_BLOCK, &block, NULL);
 	while (this->join != NULL) {
-		push_ready_queue(this->join);
+		push_queue(&ready_queue, this->join);
 		this->join = this->join->next;
 	}
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
@@ -114,7 +117,7 @@ void green_thread() {
 	this->zombie = TRUE;
 	
 	sigprocmask(SIG_BLOCK, &block, NULL);
-	running = pop_ready_queue();
+	running = pop_queue(&ready_queue);
 	setcontext(running->context);
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
 }
@@ -143,7 +146,7 @@ int green_create(green_t *new, void *(*func)(void *), void *arg) {
 	new->zombie = FALSE;
 	
 	sigprocmask(SIG_BLOCK, &block, NULL);
-	push_ready_queue(new);
+	push_queue(&ready_queue, new);
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
 	return 0;
@@ -153,9 +156,9 @@ int green_yield() {
 	sigprocmask(SIG_BLOCK, &block, NULL);
 	green_t *suspended = running;
 	
-	push_ready_queue(suspended);
+	push_queue(&ready_queue, suspended);
 	
-	running = pop_ready_queue();
+	running = pop_queue(&ready_queue);
 	swapcontext(suspended->context, running->context);
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
@@ -174,73 +177,73 @@ int green_join(green_t *thread) {
 	suspended->next = thread->join;
 	thread->join = suspended;
 	
-	running = pop_ready_queue();
+	running = pop_queue(&ready_queue);
 	swapcontext(suspended->context, running->context);
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	
 	return 0;
 }
 
-/// Push a given thread to wait on conditional variable
-static inline void push_cond(green_cond_t *condition, green_t *thread) {
-	if (condition->back != NULL) {
-		condition->back->next = thread;
-		condition->back = thread;
-	} else {
-		condition->back = condition->front = thread;
-	}
-}
-
-/// Pop a thread from a conditional variable
-static inline green_t *pop_cond(green_cond_t *condition) {
-	green_t *thread = condition->front;
-	condition->front = thread->next;
-	
-	if (thread->next == NULL) condition->back = NULL;
-	
-#if CLEAN_NEXT
-	thread->next = NULL;
-#endif // CLEAN_NEXT
-
-	return thread;
-}
-
 void green_cond_init(green_cond_t *condition) {
-	condition->front = condition->back = NULL;	// initially there are no waiting threads
+	init_queue(&condition->queue);
 }
 
-void green_cond_wait(green_cond_t *condition) {
+int green_cond_wait(green_cond_t *condition, green_mutex_t *mutex) {
 	sigprocmask(SIG_BLOCK, &block, NULL);
 	green_t *suspended = running;
-	push_cond(condition, suspended);
+	push_queue(&condition->queue, suspended);
 	
-	running = pop_ready_queue();
+	if (mutex != NULL) {
+		// Mirror green_mutex_unlock without signal unblocking	
+		if (mutex->queue.front != NULL) {
+			push_queue(&ready_queue, pop_queue(&mutex->queue));
+		}
+		
+		mutex->taken = FALSE;
+	}
+	
+	running = pop_queue(&ready_queue);
 	swapcontext(suspended->context, running->context);
+	
+	// Remember, we got swapped back into focus now
+	if (mutex != NULL) {
+		while (mutex->taken) {
+			push_queue(&mutex->queue, suspended);
+			
+			running = pop_queue(&ready_queue);
+			swapcontext(suspended->context, running->context);
+		}
+		
+		mutex->taken = TRUE;
+	}
+	
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	
+	return 0;
 }
 
 void green_cond_signal(green_cond_t *condition) {
-	if (condition->front == NULL) return;
+	if (condition->queue.front == NULL) return;
 
 	// Fairly straight forward
 	// Although user might signal a condition that no thread is waiting on...
 	sigprocmask(SIG_BLOCK, &block, NULL);
-	push_ready_queue(pop_cond(condition));
+	push_queue(&ready_queue, pop_queue(&condition->queue));
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
 }
 
 void timer_handler(int sig) {
 	green_t *suspended = running;
 	
-	push_ready_queue(suspended);
+	push_queue(&ready_queue, suspended);
 	
-	running = pop_ready_queue();
+	running = pop_queue(&ready_queue);
 	swapcontext(suspended->context, running->context);
 }
 
 void green_mutex_init(green_mutex_t *mutex) {
 	mutex->taken = FALSE;
-	mutex->suspended = NULL;
+	init_queue(&mutex->queue);
 }
 
 int green_mutex_lock(green_mutex_t *mutex) {
@@ -248,19 +251,9 @@ int green_mutex_lock(green_mutex_t *mutex) {
 	
 	green_t *suspended = running;
 	while (mutex->taken) {
-		if (mutex->suspended != NULL) {
-			// find end of queue
-			green_t *last = mutex->suspended;
-			while (last->next != NULL) last = last->next;
-			
-			last->next = suspended;
-		} else {
-			// Get first in queue
-			mutex->suspended = suspended;
-		}
-		suspended->next = NULL;
+		push_queue(&mutex->queue, suspended);
 		
-		running = pop_ready_queue();
+		running = pop_queue(&ready_queue);
 		swapcontext(suspended->context, running->context);
 	}
 	
@@ -274,9 +267,8 @@ int green_mutex_unlock(green_mutex_t *mutex) {
 	sigprocmask(SIG_BLOCK, &block, NULL);
 	
 	// Move only one thread, as the only way its one of the suspended onces is it's trying to lock mutex
-	if (mutex->suspended != NULL) {
-		push_ready_queue(mutex->suspended);
-		mutex->suspended = mutex->suspended->next;
+	if (mutex->queue.front != NULL) {
+		push_queue(&ready_queue, pop_queue(&mutex->queue));
 	}
 	
 	mutex->taken = FALSE;
