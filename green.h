@@ -19,7 +19,6 @@ typedef struct green_t {
 
 /// Basic queue header for this library
 typedef struct green_queue_t {
-	int count;
 	struct green_t *front, *back;
 } green_queue_t;
 

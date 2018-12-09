@@ -23,6 +23,7 @@
 #define CLEAN_NEXT			1	// Make sure the green_t.next is NULL on a freshly popped thread
 #define NON_EMPTY_ASSERT	1	// Check queue emptiness on popping
 
+
 static ucontext_t		main_context = {0};
 static green_t			main_green = {&main_context, NULL, NULL, NULL, NULL, FALSE};
 
@@ -32,14 +33,13 @@ static green_t			*running = &main_green;
 
 static green_queue_t	ready_queue;
 
+
 static inline void push_queue(green_queue_t *queue, green_t *thread) {
 	queue->back = (queue->back) ? (queue->back->next = thread) : (queue->front = thread);
 }
 
 static inline green_t *pop_queue(green_queue_t *queue) {
-	queue->count--;
 #if NON_EMPTY_ASSERT
-	if (queue->front == NULL) printf("%p - PANIC! (%i)\n", queue, queue->count);
 	assert(queue->front != NULL);
 #endif // NON_EMPTY_ASSERT
 	green_t *thread = queue->front;
@@ -56,12 +56,22 @@ static inline green_t *pop_queue(green_queue_t *queue) {
 
 static inline void init_queue(green_queue_t *queue) {
 	queue->front = queue->back = NULL;
-	queue->count = 0;
 }
+
+static inline void block_interrupts() {
+	sigprocmask(SIG_BLOCK, &block, NULL);
+}
+
+static inline void unblock_interrupts() {
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+}
+
 
 void timer_handler(int);
 
+
 static void init()	__attribute__((constructor));	// why hate on C, only any library you add can have an invisible initialize function
+
 
 void init() {
 	getcontext(&main_context);
@@ -93,6 +103,8 @@ void init() {
 		ITIMER_VIRTUAL,	// use user-time
 		&period,		// the new itimerval to set to
 		NULL);			// the out pointer for old itimerval
+	
+	block_interrupts();
 }
 
 void green_thread() {
@@ -102,12 +114,12 @@ void green_thread() {
 	
 	// We are in key area, so make sure not to corrupt any queues
 	// Place waiting thread to the ready queue
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	while (this->join != NULL) {
 		push_queue(&ready_queue, this->join);
 		this->join = this->join->next;
 	}
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	// Free allocated memory
 	free(this->context->uc_stack.ss_sp);
@@ -116,10 +128,10 @@ void green_thread() {
 	// this thread is now a zombie
 	this->zombie = TRUE;
 	
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	running = pop_queue(&ready_queue);
 	setcontext(running->context);
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 }
 
 int green_create(green_t *new, void *(*func)(void *), void *arg) {
@@ -145,22 +157,22 @@ int green_create(green_t *new, void *(*func)(void *), void *arg) {
 	new->join = NULL;
 	new->zombie = FALSE;
 	
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	push_queue(&ready_queue, new);
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	return 0;
 }
 
 int green_yield() {
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	green_t *suspended = running;
 	
 	push_queue(&ready_queue, suspended);
 	
 	running = pop_queue(&ready_queue);
 	swapcontext(suspended->context, running->context);
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	return 0;
 }
@@ -168,7 +180,7 @@ int green_yield() {
 int green_join(green_t *thread) {
 	if (thread->zombie) return 0;
 	
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	green_t *suspended = running;
 	
 	// This is smart
@@ -179,7 +191,7 @@ int green_join(green_t *thread) {
 	
 	running = pop_queue(&ready_queue);
 	swapcontext(suspended->context, running->context);
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	return 0;
 }
@@ -189,7 +201,7 @@ void green_cond_init(green_cond_t *condition) {
 }
 
 int green_cond_wait(green_cond_t *condition, green_mutex_t *mutex) {
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	green_t *suspended = running;
 	push_queue(&condition->queue, suspended);
 	
@@ -217,7 +229,7 @@ int green_cond_wait(green_cond_t *condition, green_mutex_t *mutex) {
 		mutex->taken = TRUE;
 	}
 	
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	return 0;
 }
@@ -226,10 +238,9 @@ void green_cond_signal(green_cond_t *condition) {
 	if (condition->queue.front == NULL) return;
 
 	// Fairly straight forward
-	// Although user might signal a condition that no thread is waiting on...
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	push_queue(&ready_queue, pop_queue(&condition->queue));
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 }
 
 void timer_handler(int sig) {
@@ -247,7 +258,7 @@ void green_mutex_init(green_mutex_t *mutex) {
 }
 
 int green_mutex_lock(green_mutex_t *mutex) {
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	
 	green_t *suspended = running;
 	while (mutex->taken) {
@@ -258,13 +269,13 @@ int green_mutex_lock(green_mutex_t *mutex) {
 	}
 	
 	mutex->taken = TRUE;
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	return 0;
 }
 
 int green_mutex_unlock(green_mutex_t *mutex) {
-	sigprocmask(SIG_BLOCK, &block, NULL);
+	block_interrupts();
 	
 	// Move only one thread, as the only way its one of the suspended onces is it's trying to lock mutex
 	if (mutex->queue.front != NULL) {
@@ -272,7 +283,7 @@ int green_mutex_unlock(green_mutex_t *mutex) {
 	}
 	
 	mutex->taken = FALSE;
-	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	unblock_interrupts();
 	
 	return 0;
 }
