@@ -103,8 +103,6 @@ void init() {
 		ITIMER_VIRTUAL,	// use user-time
 		&period,		// the new itimerval to set to
 		NULL);			// the out pointer for old itimerval
-	
-	block_interrupts();
 }
 
 void green_thread() {

@@ -207,7 +207,7 @@ void *hugger(void *arg) {
 #if VERBOSE_HUGGER
 			printf("Hugger at %i cycles, still no yield!\n", i);
 #endif // VERBOSE_HUGGER
-			//do_counters(counters, mutex);
+			do_counters(counters, mutex);
 		}
 	}
 }
